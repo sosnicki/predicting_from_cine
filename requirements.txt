@@ -1,0 +1,4 @@
+numpy
+pycimg
+pyradiomics
+simple_settings
