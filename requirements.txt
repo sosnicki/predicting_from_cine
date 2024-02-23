@@ -1,4 +1,8 @@
 numpy
 pycimg
 pyradiomics
-simple_settings
+simple-settings
+pandas
+joblib
+scikit-learn
+optuna
