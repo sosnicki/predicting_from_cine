@@ -23,6 +23,7 @@ class Sample:
     optical_flow: np.ndarray  # optical flow - przepływ z opencv
     registration_transform: np.ndarray  # registration - inna transformacja
     mask: np.ndarray  # gdzie jest ściana serca, wyznaczana automatem, 1 to nasz obszar do szukania
+    mask_from_LGE: np.ndarray
 
 
 @dataclass

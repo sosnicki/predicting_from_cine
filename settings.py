@@ -7,3 +7,5 @@ ANALYSIS_DIR = (BASE_DIR / '..' / 'analiza').resolve()
 CACHE_FILE = (BASE_DIR / '..' / 'dane' / 'cache.pkl').resolve()
 
 MAX_VALUE = 2**12
+SOURCES = ['cine', 'registration_transform', 'optical_flow']
+PREFIXES = ['', 'Small']

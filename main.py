@@ -1,3 +1,4 @@
+import logging
 import multiprocessing as mp
 import os
 import pickle
@@ -27,18 +28,20 @@ from sklearn.svm import SVC
 import settings
 from dc import Result, Feature, Sample
 
-import logging
 
 def _extract_features(source, params, sample):
-    extractor = featureextractor.RadiomicsFeatureExtractor(**params)
-    img = getattr(sample, source)
-    if source != 'cine':
-        img = np.sqrt(np.square(img[:, :, 0]) + np.square(img[:, :, 1]))
-    image = sitk.GetImageFromArray(img)
-    mask = sitk.GetImageFromArray(sample.mask)
-    result = extractor.execute(image, mask)
-    features = {k.replace('-', '_'): v for k, v in result.items()}
-    return Feature(source=source, **features)
+    try:
+        extractor = featureextractor.RadiomicsFeatureExtractor(**params)
+        img = getattr(sample, source)
+        if source != 'cine':
+            img = np.sqrt(np.square(img[:, :, 0]) + np.square(img[:, :, 1]))
+        image = sitk.GetImageFromArray(img)
+        mask = sitk.GetImageFromArray(sample.mask)
+        result = extractor.execute(image, mask)
+        features = {k.replace('-', '_'): v for k, v in result.items()}
+        return Feature(source=source, **features)
+    except Exception as e:
+        logging.error(e)
 
 
 class Main:
@@ -46,42 +49,53 @@ class Main:
     values: list[Sample] = []
     features: list[Feature] = None
 
-    def __init__(self):
+    def __init__(self, source: str, prefix: str = ''):
+        self.prefix = prefix
+        self.source = source
         self.log = logging.getLogger('main')
         self.log.setLevel(logging.DEBUG)
         self.log.addHandler(logging.FileHandler(settings.ANALYSIS_DIR / 'main.log'))
-        if settings.CACHE_FILE.exists():
-            self.data = pickle.loads(settings.CACHE_FILE.read_bytes())
-            print(f'File "{settings.CACHE_FILE}": {len(self.data)} samples')
+        self.gather_features(source)
+
+    def load(self):
+        cache_file = settings.DATA_DIR / f'cache{self.prefix}.pkl'
+        if cache_file.exists():
+            self.data = pickle.loads(cache_file.read_bytes())
+            print(f'File "{cache_file}": {len(self.data)} samples')
         else:
             self.data = []
-            for file in settings.DATA_DIR.iterdir():
+            for name in ['negative', 'positive', 'artifacts']:
+                file = settings.DATA_DIR / f'{name}{self.prefix}.npy'
                 if not file.name.endswith('.npy'):
                     continue
                 arr = np.load(file, allow_pickle=True)
                 print(f'File "{file}": {arr.size} samples')
                 for d in arr:
                     self.data.append(Sample(**d))
-            settings.CACHE_FILE.write_bytes(pickle.dumps(self.data))
+            cache_file.write_bytes(pickle.dumps(self.data))
 
     def show_img(self, arr):
         img = CImg(arr)
         img.display()
 
     def stats(self):
-        label = 0
+        ones = 0
+        zeros = 0
         max_value = 0
         min_value = sys.maxsize
         print(f"Samples: {len(self.data)}")
         for d in self.data:
-            label += d.label
+            if d.label == 1:
+                ones += 1
+            else:
+                zeros += 1
             if max_value < d.cine.max():
                 max_value = d.cine.max()
             if min_value > d.cine.min():
                 min_value = d.cine.min()
-        print(f'Min value: {min_value}')
-        print(f'Max value: {max_value}')
-        print(f'Label: {label}')
+        print(f'Min value: {min_value}, Max value: {max_value}')
+        print(f'Ones: {ones}, Zeros: {zeros}')
+        print(f'Features "{self.source}": {len(self.features)}')
 
     def parallel(self, function, param_tuples):
         if sys.gettrace():
@@ -92,13 +106,11 @@ class Main:
                                                                   for params in param_tuples)
 
     def gather_features(self, source: str):
-        if source != 'cine':
-            self.data = [s for s in self.data if s.optical_flow.any()]
-
-        features_file = settings.DATA_DIR / f'features_{source}.pkl'
+        features_file = settings.DATA_DIR / f'features{self.prefix}_{source}.pkl'
         if features_file.exists():
-            self.features = pickle.loads(features_file.read_bytes())
+            self.data, self.features = pickle.loads(features_file.read_bytes())
         else:
+            self.load()
             params = {
                 'binWidth': 25,
                 'normalize': True,
@@ -111,8 +123,12 @@ class Main:
                 'label': 1,
                 'additionalInfo': True
             }
-            self.features = self.parallel(_extract_features, [(source, params, sample) for sample in self.data])
-            features_file.write_bytes(pickle.dumps(self.features))
+
+            features = self.parallel(_extract_features, [(source, params, sample) for sample in self.data])
+            self.data = [d for d, f in zip(self.data, features) if f is not None]
+            self.features = [f for f in features if f is not None]
+
+            features_file.write_bytes(pickle.dumps([self.data, self.features]))
 
     # Pearson correlation coefficient
     def pcc(self, kind: str):
@@ -278,11 +294,10 @@ class Main:
         return result
 
 
-def worker(features_source: str, prep: str, method: str, random_state: int,
+def worker(prefix: str, features_source: str, prep: str, method: str, random_state: int,
            queue: mp.Queue) -> Result:
-    main = Main()
+    main = Main(features_source, prefix)
     try:
-        main.gather_features(features_source)
         # return Result(params={'a': 1}, value=1, prep=prep, method=method)
         result = main.classify_optuna(prep, method, random_state)
         result.source = features_source
@@ -292,10 +307,9 @@ def worker(features_source: str, prep: str, method: str, random_state: int,
         main.log.exception(f'Worker exception {features_source=} {prep=} {method=} {random_state=}')
 
 
-
-def result_writer(queue: mp.Queue) -> None:
+def result_writer(prefix: str, queue: mp.Queue) -> None:
     results = []
-    results_file = settings.ANALYSIS_DIR / 'result.pkl'
+    results_file = settings.ANALYSIS_DIR / f'result{prefix}.pkl'
     while result := queue.get():
         results.append(result)
         results_file.write_bytes(pickle.dumps(results))
@@ -319,11 +333,11 @@ def main():
         prep = sys.argv[1]
         method = sys.argv[2]
 
-        main = Main()
-        main.stats()
-        main.gather_features('registration_transform')
+        for source in settings.SOURCES:
+            main = Main(source, '')
+            main.stats()
         # main.classify(prep, method)
-        result = main.classify_optuna(prep, method)
+        # result = main.classify_optuna(prep, method)
 
         # print(f"Params: {result['params']}")
         # print(f"Value: {result['value']}")
@@ -332,23 +346,24 @@ def main():
         # ustawianie niższego priorytetu obliczeń niż procesy w systemie
         os.nice(10)
         manager = mp.Manager()
-        shared_queue = manager.Queue()
-        p = mp.Process(target=result_writer, args=(shared_queue,))
-        p.start()
 
-        methods = ['knn', 'rf', 'gbc']
-        preps = ['raw', 'pca', 'pearson']
-        # preps = ['pca']
-        features_sources = ['cine', 'registration_transform', 'optical_flow']
-        np.random.seed(7)
-        random_states = np.random.randint(low=1, high=1000, size=10)
-        joblib.Parallel(n_jobs=-1, backend='multiprocessing')(
-            joblib.delayed(worker)(features_source, prep, method, rs, shared_queue)
-            for prep in preps
-            for method in methods
-            for features_source in features_sources
-            for rs in random_states)
-        p.terminate()
+        for prefix in settings.PREFIXES:
+            shared_queue = manager.Queue()
+            p = mp.Process(target=result_writer, args=(prefix, shared_queue,))
+            p.start()
+
+            methods = ['knn', 'rf', 'gbc']
+            preps = ['raw', 'pca', 'pearson']
+            # preps = ['pca']
+            np.random.seed(7)
+            random_states = np.random.randint(low=1, high=1000, size=10)
+            joblib.Parallel(n_jobs=-1, backend='multiprocessing')(
+                joblib.delayed(worker)(prefix, features_source, prep, method, rs, shared_queue)
+                for prep in preps
+                for method in methods
+                for features_source in settings.SOURCES
+                for rs in random_states)
+            p.terminate()
 
 
 if __name__ == '__main__':
