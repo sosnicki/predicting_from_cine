@@ -1,5 +1,6 @@
 import pickle
 import sys
+from collections import Counter
 from dataclasses import asdict
 
 import pandas as pd
@@ -9,19 +10,22 @@ from dc import Result
 
 
 class Analyzer:
-    results: list[Result]
-
-    def __init__(self, prefix: str):
-        self.prefix = prefix
-
-    def run(self):
-        results_file = settings.ANALYSIS_DIR / f'result{self.prefix}.pkl'
-        self.results = pickle.loads(results_file.read_bytes())
-        df = pd.DataFrame([asdict(r) for r in self.results])
+    def results(self):
+        data = []
+        for prefix in settings.PREFIXES:
+            results_file = settings.ANALYSIS_DIR / f'result{prefix}.pkl'
+            results = pickle.loads(results_file.read_bytes())
+            data.extend([asdict(r) | {'set': prefix} for r in results])
+        df = pd.DataFrame(data)
         df['samples'] = df['y_pred'].apply(lambda x: len(x))
+        df['y_true'] = df['y_true'].apply(lambda x: str(Counter(x))[8:-1])
+        df['y_pred'] = df['y_pred'].apply(lambda x: str(Counter(x))[8:-1])
         print(df)
         keys = [
+            'set',
             'samples',
+            'y_true',
+            'y_pred',
             'source',
             'prep',
             'method',
@@ -29,38 +33,44 @@ class Analyzer:
             'accuracy',
             'roc_auc',
             'random_state',
+            'sampler'
         ]
-        df[keys].to_csv(settings.ANALYSIS_DIR / f'result{self.prefix}.csv')
+        df[keys].to_csv(settings.ANALYSIS_DIR / f'results.csv')
+
+    def count_labels(self, data):
+        labels = [s.label for s in data]
+        counter = Counter(labels)
+        return f'{counter[0]}\t{counter[1]}'
 
     def stats(self):
-        ones = 0
-        zeros = 0
-        max_value = 0
-        min_value = sys.maxsize
-        data = pickle.loads((settings.DATA_DIR / f'cache{self.prefix}.pkl').read_bytes())
-        print(f'Samples "{self.prefix}": {len(data)}')
-        for d in data:
-            if d.label == 1:
-                ones += 1
-            else:
-                zeros += 1
-            if max_value < d.cine.max():
-                max_value = d.cine.max()
-            if min_value > d.cine.min():
-                min_value = d.cine.min()
-        print(f'Min value: {min_value}, Max value: {max_value}')
-        print(f'Ones: {ones}, Zeros: {zeros}')
-        for source in settings.SOURCES:
-            filtered_data, features = pickle.loads(
-                (settings.DATA_DIR / f'features{self.prefix}_{source}.pkl').read_bytes())
-            print(f'Features "{source}": {len(features)}')
+        for prefix in settings.PREFIXES:
+            max_value = 0
+            min_value = sys.maxsize
+            data = pickle.loads((settings.DATA_DIR / f'cache{prefix}.pkl').read_bytes())
+            print(f'Samples "{prefix}":\t{len(data)}\t{self.count_labels(data)}')
+            for d in data:
+                if max_value < d.cine.max():
+                    max_value = d.cine.max()
+                if min_value > d.cine.min():
+                    min_value = d.cine.min()
+            print(f'Min value: {min_value}, Max value: {max_value}')
+            for source in settings.SOURCES:
+                data = pickle.loads((settings.DATA_DIR / f'features{prefix}_{source}.pkl').read_bytes())
+                print(f'Features "{source}":\t{len(data)}\t{self.count_labels(data)}')
+                for sampler in settings.SAMPLERS:
+                    if not sampler:
+                        continue
+                    data = pickle.loads((settings.DATA_DIR / f'sampling{prefix}_{source}_{sampler}_176.pkl')
+                                        .read_bytes())
+                    print(f'Features "{source}" "{sampler}":\t{len(data)}\t{self.count_labels(data)}')
 
 
 def main():
-    for prefix in settings.PREFIXES:
-        analyzer = Analyzer(prefix)
-        # analyzer.stats()
-        analyzer.run()
+    analyzer = Analyzer()
+    if sys.argv[1] == 'stats':
+        analyzer.stats()
+    elif sys.argv[1] == 'results':
+        analyzer.results()
 
 
 if __name__ == '__main__':

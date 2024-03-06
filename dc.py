@@ -1,4 +1,5 @@
 from dataclasses import dataclass, asdict
+
 import numpy as np
 
 
@@ -13,17 +14,7 @@ class Result:
     y_pred: np.ndarray
     random_state: int
     source: str = None
-
-
-@dataclass
-class Sample:
-    label: int  # 0 - serce jest zdrowe, 1 - w o brębie miokarbium są blizny
-    cine: np.ndarray  # oryginał - rozkurczone
-    cine_delayed: np.ndarray  # ten sam obszar co cine, ale w trakcie 1/4 skurczu
-    optical_flow: np.ndarray  # optical flow - przepływ z opencv
-    registration_transform: np.ndarray  # registration - inna transformacja
-    mask: np.ndarray  # gdzie jest ściana serca, wyznaczana automatem, 1 to nasz obszar do szukania
-    mask_from_LGE: np.ndarray
+    sampler: str = None
 
 
 @dataclass
@@ -148,3 +139,15 @@ class Feature:
     @property
     def values(self):
         return {k: v for k, v in asdict(self).items() if k != 'source' and not k.startswith('diagnostics')}
+
+
+@dataclass
+class Sample:
+    label: int  # 0 - serce jest zdrowe, 1 - w o brębie miokarbium są blizny
+    cine: np.ndarray  # oryginał - rozkurczone
+    cine_delayed: np.ndarray  # ten sam obszar co cine, ale w trakcie 1/4 skurczu
+    optical_flow: np.ndarray  # optical flow - przepływ z opencv
+    registration_transform: np.ndarray  # registration - inna transformacja
+    mask: np.ndarray  # gdzie jest ściana serca, wyznaczana automatem, 1 to nasz obszar do szukania
+    mask_from_LGE: np.ndarray
+    features: Feature = None

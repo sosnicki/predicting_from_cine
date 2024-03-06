@@ -4,13 +4,16 @@ import os
 import pickle
 import sys
 import time
-from typing import Any
+from collections import Counter
+from typing import Any, Optional
 
 import SimpleITK as sitk
 import joblib
 import numpy as np
 import optuna
 import pandas as pd
+from imblearn.over_sampling import RandomOverSampler
+from imblearn.under_sampling import RandomUnderSampler
 from joblib import Parallel, delayed
 from pycimg import CImg
 from radiomics import featureextractor
@@ -47,15 +50,19 @@ def _extract_features(source, params, sample):
 class Main:
     data: list[Sample]
     values: list[Sample] = []
-    features: list[Feature] = None
 
-    def __init__(self, source: str, prefix: str = ''):
+    def __init__(self, source: str, prefix: str, sampler: Optional[str], random_state: int):
         self.prefix = prefix
         self.source = source
+        self.sampler = sampler
+        self.random_state = random_state
         self.log = logging.getLogger('main')
         self.log.setLevel(logging.DEBUG)
         self.log.addHandler(logging.FileHandler(settings.ANALYSIS_DIR / 'main.log'))
-        self.gather_features(source)
+        if self.sampler:
+            self.sampling()
+        else:
+            self.gather_features()
 
     def load(self):
         cache_file = settings.DATA_DIR / f'cache{self.prefix}.pkl'
@@ -78,25 +85,6 @@ class Main:
         img = CImg(arr)
         img.display()
 
-    def stats(self):
-        ones = 0
-        zeros = 0
-        max_value = 0
-        min_value = sys.maxsize
-        print(f"Samples: {len(self.data)}")
-        for d in self.data:
-            if d.label == 1:
-                ones += 1
-            else:
-                zeros += 1
-            if max_value < d.cine.max():
-                max_value = d.cine.max()
-            if min_value > d.cine.min():
-                min_value = d.cine.min()
-        print(f'Min value: {min_value}, Max value: {max_value}')
-        print(f'Ones: {ones}, Zeros: {zeros}')
-        print(f'Features "{self.source}": {len(self.features)}')
-
     def parallel(self, function, param_tuples):
         if sys.gettrace():
             for params in param_tuples:
@@ -105,10 +93,10 @@ class Main:
             return Parallel(n_jobs=-1, backend='multiprocessing')(delayed(function)(*params)
                                                                   for params in param_tuples)
 
-    def gather_features(self, source: str):
-        features_file = settings.DATA_DIR / f'features{self.prefix}_{source}.pkl'
+    def gather_features(self):
+        features_file = settings.DATA_DIR / f'features{self.prefix}_{self.source}.pkl'
         if features_file.exists():
-            self.data, self.features = pickle.loads(features_file.read_bytes())
+            self.data = pickle.loads(features_file.read_bytes())
         else:
             self.load()
             params = {
@@ -124,11 +112,38 @@ class Main:
                 'additionalInfo': True
             }
 
-            features = self.parallel(_extract_features, [(source, params, sample) for sample in self.data])
-            self.data = [d for d, f in zip(self.data, features) if f is not None]
-            self.features = [f for f in features if f is not None]
+            features = self.parallel(_extract_features, [(self.source, params, sample) for sample in self.data])
+            filtered_data = []
+            for d, f in zip(self.data, features):
+                if f is None:
+                    continue
+                d.features = f
+                filtered_data.append(d)
+            self.data = filtered_data
 
-            features_file.write_bytes(pickle.dumps([self.data, self.features]))
+            features_file.write_bytes(pickle.dumps(self.data))
+
+    def sampling(self):
+        sampling_file = settings.DATA_DIR / (f'sampling{self.prefix}_{self.source}_'
+                                             f'{self.sampler}_{self.random_state}.pkl')
+        if sampling_file.exists():
+            self.data = pickle.loads(sampling_file.read_bytes())
+        else:
+            self.gather_features()
+
+            X, y = self.dataset
+            print(self.sampler)
+            print('before', Counter(y))
+            if self.sampler == 'OverSampler':
+                ros = RandomOverSampler(random_state=self.random_state)
+            elif self.sampler == 'UnderSampler':
+                ros = RandomUnderSampler(random_state=self.random_state)
+            else:
+                raise Exception('Invalid Sampler')
+            X_res, y_res = ros.fit_resample(X, y)
+            print('after', Counter(y_res))
+            self.data = [self.data[i] for i in ros.sample_indices_]
+            sampling_file.write_bytes(pickle.dumps(self.data))
 
     # Pearson correlation coefficient
     def pcc(self, kind: str):
@@ -142,8 +157,12 @@ class Main:
 
     @property
     def dataset(self):
-        X = pd.DataFrame([f.values for f in self.features])
-        y = np.array([s.label for s in self.data])
+        X, y = [], []
+        for sample in self.data:
+            X.append(sample.features.values)
+            y.append(sample.label)
+        X = pd.DataFrame(X)
+        y = np.array(y)
         return X, y
 
     def pca(self):
@@ -206,11 +225,11 @@ class Main:
         toc = time.perf_counter()
         print(f'Time: {toc - tic:.1f}')
 
-    def classify_optuna(self, prep: str, method: str, random_state: int = 42):
+    def classify_optuna(self, prep: str, method: str):
         tic = time.perf_counter()
         X, y = self.preprocess(prep)
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=random_state)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=self.random_state)
         match method:
             case 'knn':
                 classifier_cls = KNeighborsClassifier
@@ -288,27 +307,27 @@ class Main:
             roc_auc=roc_auc,
             y_pred=y_pred,
             y_true=y_test,
-            random_state=random_state
+            random_state=self.random_state,
+            source=self.source,
+            sampler=self.sampler
         )
         self.log.info(f'Method: {method}, Time: {toc - tic:.1f}, {result.accuracy}')
         return result
 
 
-def worker(prefix: str, features_source: str, prep: str, method: str, random_state: int,
+def worker(prefix: str, features_source: str, sampler: str, prep: str, method: str, random_state: int,
            queue: mp.Queue) -> Result:
-    main = Main(features_source, prefix)
+    main = Main(features_source, prefix, sampler, random_state)
     try:
         # return Result(params={'a': 1}, value=1, prep=prep, method=method)
-        result = main.classify_optuna(prep, method, random_state)
-        result.source = features_source
+        result = main.classify_optuna(prep, method)
         queue.put(result)
         return result
     except:
         main.log.exception(f'Worker exception {features_source=} {prep=} {method=} {random_state=}')
 
 
-def result_writer(prefix: str, queue: mp.Queue) -> None:
-    results = []
+def result_writer(prefix: str, queue: mp.Queue, results: list[Result]) -> None:
     results_file = settings.ANALYSIS_DIR / f'result{prefix}.pkl'
     while result := queue.get():
         results.append(result)
@@ -329,40 +348,47 @@ def table(data: dict[str, dict[str, Any]]):
 
 
 def main():
-    if len(sys.argv) == 3:
-        prep = sys.argv[1]
-        method = sys.argv[2]
+    if len(sys.argv) < 2:
+        print('Brak arguentów')
+        return
 
+    if sys.argv[1] == 'test':
+        main = Main('cine', '', None, 42)
+        result = main.classify_optuna('pca', 'knn')
+        print(f"Params: {result.params}")
+        print(f"Accuracy: {result.accuracy}")
+    elif sys.argv[1] == 'prepare':
         for source in settings.SOURCES:
-            main = Main(source, '')
-            main.stats()
-        # main.classify(prep, method)
-        # result = main.classify_optuna(prep, method)
-
-        # print(f"Params: {result['params']}")
-        # print(f"Value: {result['value']}")
-
-    else:
+            for prefix in settings.PREFIXES:
+                for sampler in settings.SAMPLERS:
+                    for rs in settings.RANDOM_STATES:
+                        Main(source, prefix, sampler, rs)
+    elif sys.argv[1] == 'classify':
         # ustawianie niższego priorytetu obliczeń niż procesy w systemie
         os.nice(10)
         manager = mp.Manager()
 
         for prefix in settings.PREFIXES:
+            results = pickle.loads((settings.ANALYSIS_DIR / f'result{prefix}.pkl').read_bytes())
             shared_queue = manager.Queue()
-            p = mp.Process(target=result_writer, args=(prefix, shared_queue,))
+            p = mp.Process(target=result_writer, args=(prefix, shared_queue, results))
             p.start()
 
             methods = ['knn', 'rf', 'gbc']
             preps = ['raw', 'pca', 'pearson']
             # preps = ['pca']
-            np.random.seed(7)
-            random_states = np.random.randint(low=1, high=1000, size=10)
-            joblib.Parallel(n_jobs=-1, backend='multiprocessing')(
-                joblib.delayed(worker)(prefix, features_source, prep, method, rs, shared_queue)
-                for prep in preps
-                for method in methods
-                for features_source in settings.SOURCES
-                for rs in random_states)
+            results_set = {(prefix, r.source, r.sampler, r.prep, r.method, r.random_state) for r in results}
+            params = []
+            for prep in preps:
+                for method in methods:
+                    for source in settings.SOURCES:
+                        for sampler in settings.SAMPLERS:
+                            for rs in settings.RANDOM_STATES:
+                                if (prefix, source, sampler, prep, method, rs) in results_set:
+                                    print('Skip', (prefix, source, sampler, prep, method, rs))
+                                else:
+                                    params.append((prefix, source, sampler, prep, method, rs, shared_queue))
+            joblib.Parallel(n_jobs=-1, backend='multiprocessing')(map(lambda x: joblib.delayed(worker)(*x), params))
             p.terminate()
 
 
