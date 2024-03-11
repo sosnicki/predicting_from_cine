@@ -58,6 +58,7 @@ class Main:
         self.random_state = random_state
         self.log = logging.getLogger('main')
         self.log.setLevel(logging.DEBUG)
+        settings.ANALYSIS_DIR.mkdir(exist_ok=True)
         self.log.addHandler(logging.FileHandler(settings.ANALYSIS_DIR / 'main.log'))
         if self.sampler:
             self.sampling()
@@ -124,9 +125,9 @@ class Main:
             features_file.write_bytes(pickle.dumps(self.data))
 
     def sampling(self):
-        sampling_file = settings.DATA_DIR / (f'sampling{self.prefix}_{self.source}_'
-                                             f'{self.sampler}_{self.random_state}.pkl')
-        if sampling_file.exists():
+        filename = f'sampling{self.prefix}_{self.source}_{self.sampler}_{self.random_state}'
+        sampling_file = settings.DATA_DIR / f'{filename}.pkl'
+        if not sampling_file.exists():
             self.data = pickle.loads(sampling_file.read_bytes())
         else:
             self.gather_features()
@@ -141,6 +142,11 @@ class Main:
             else:
                 raise Exception('Invalid Sampler')
             X_res, y_res = ros.fit_resample(X, y)
+
+            df = pd.DataFrame(ros.sample_indices_)
+            fig = df.plot.hist().get_figure()
+            fig.savefig(settings.DATA_DIR / f'{filename}_indices.png')
+            df.to_csv(settings.DATA_DIR / f'{filename}_indices.csv')
             print('after', Counter(y_res))
             self.data = [self.data[i] for i in ros.sample_indices_]
             sampling_file.write_bytes(pickle.dumps(self.data))
@@ -254,6 +260,19 @@ class Main:
                     )
                     rf = RandomForestClassifier(**params)
                     return cross_val_score(rf, X_train, y_train, cv=5).mean()
+            case 'rfb':
+                classifier_cls = RandomForestClassifier
+
+                def optimize(trial: optuna.Trial):
+                    params = dict(
+                        n_estimators=trial.suggest_int('n_estimators', 50, 200),
+                        max_depth=trial.suggest_int('max_depth', 5, 50),
+                        min_samples_split=trial.suggest_int('min_samples_split', 2, 20),
+                        min_samples_leaf=trial.suggest_int('min_samples_leaf', 1, 20),
+                        class_weight='balanced'
+                    )
+                    rf = RandomForestClassifier(**params)
+                    return cross_val_score(rf, X_train, y_train, cv=5).mean()
             case 'svm':
                 classifier_cls = SVC
 
@@ -334,19 +353,6 @@ def result_writer(prefix: str, queue: mp.Queue, results: list[Result]) -> None:
         results_file.write_bytes(pickle.dumps(results))
 
 
-def table(data: dict[str, dict[str, Any]]):
-    headers = {' '}
-    for columns in data.values():
-        headers.update(columns.keys())
-    print('\t'.join(sorted(headers)))
-
-    for row in sorted(data):
-        row_texts = [row]
-        for col in sorted(data[row]):
-            row_texts.append(f"\t{data[row][col]}")
-        print('\t'.join(row_texts))
-
-
 def main():
     if len(sys.argv) < 2:
         print('Brak arguentów')
@@ -380,9 +386,9 @@ def main():
             results_set = {(prefix, r.source, r.sampler, r.prep, r.method, r.random_state) for r in results}
             params = []
             for prep in preps:
-                for method in methods:
+                for method in ['rfb']:#methods:
                     for source in settings.SOURCES:
-                        for sampler in settings.SAMPLERS:
+                        for sampler in [None]:#settings.SAMPLERS:
                             for rs in settings.RANDOM_STATES:
                                 if (prefix, source, sampler, prep, method, rs) in results_set:
                                     print('Skip', (prefix, source, sampler, prep, method, rs))

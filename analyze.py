@@ -1,12 +1,13 @@
 import pickle
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict
 
+import numpy as np
 import pandas as pd
 
 import settings
-from dc import Result
+from dc import Result, Sample
 
 
 class Analyzer:
