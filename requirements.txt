@@ -7,3 +7,33 @@ joblib
 scikit-learn
 optuna
 imblearn
+
+
+
+
+# www
+Django
+django-crispy-forms
+crispy-bootstrap5
+
+# pakiety numeryczne
+numpy
+scipy
+scikit-learn
+matplotlib
+seaborn
+scikit-image
+opencv-contrib-python-headless
+julia
+
+# obsługa MongoDB
+pymongo
+mongoengine
+
+# inne
+joblib
+rich
+psutil
+python-slugify
+treelib
+mpld3
