@@ -1,13 +1,12 @@
 numpy
 pycimg
 pyradiomics
-simple-settings
 pandas
 joblib
 scikit-learn
 optuna
 imblearn
-
+nibabel
 
 
 

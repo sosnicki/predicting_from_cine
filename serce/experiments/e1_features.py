@@ -12,7 +12,7 @@ TASKS = []
 split_task_dict = defaultdict(list)
 
 np.random.seed(7)
-seeds = np.random.randint(low=1, high=1000, size=1)
+seeds = np.random.randint(low=1, high=1000, size=10)
 
 
 def make_tasks():
@@ -36,7 +36,7 @@ def make_tasks():
     TASKS.extend(radiomics_tasks)
     TASKS.append(SyncTask('RadiomicsFeature'))
 
-    for source in ['cine', 'optical_flow', 'registration_transform', 'cine+optical_flow+registration_transform']:
+    for source in ['cine', 'optical_flow', 'registration_transform', 'cine+optical_flow', 'cine+registration_transform']:
         for radiomics_task in radiomics_tasks:
             for seed in seeds:
                 split_task = SplitTask(cin_name=radiomics_task.cout_name, test_size=0.2, cv=5, y_key='label',

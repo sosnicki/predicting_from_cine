@@ -31,10 +31,11 @@ def make_tasks():
 
     for vect_task in vect_tasks:
         for pipeline, param_grid in params:
-            if pipeline[0][0] == 'GBC':
-                n_trials_list = [100, 300]
-            else:
-                n_trials_list = [100]
+            # if pipeline[0][0] == 'GBC':
+            #     n_trials_list = [100, 300]
+            # else:
+            #     n_trials_list = [100]
+            n_trials_list = [100]
             for n_trials in n_trials_list:
                 opt_task = OptunaTask(vect_name=vect_task.dout_name, pipeline=pipeline, params=param_grid,
                                       n_trials=n_trials)

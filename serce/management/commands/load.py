@@ -21,7 +21,7 @@ class Command(BaseCommand):
         prefix = options['prefix']
         for name in ['negative', 'positive', 'artifacts']:
             print(name)
-            file = settings.SOURCE_DIR / f'{name}{prefix}.npy'
+            file = settings.SOURCE_DATA_DIR / f'{name}{prefix}.npy'
             arr = np.load(file, allow_pickle=True)
             print(f'File "{file}": {arr.size} samples')
             for d in arr:

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 DATA_DIR = Path('/mnt/dane/serce/dane')
-SOURCE_DIR = Path('/mnt/dane/serce/source')
+SOURCE_DATA_DIR = Path('/home/ts/serce/zrodla/')
 ANALYSIS_DIR = Path('/home/ts/serce/analiza/')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.

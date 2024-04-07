@@ -1,4 +1,5 @@
 import traceback
+from collections import OrderedDict
 
 import SimpleITK as sitk
 import numpy as np
@@ -10,6 +11,16 @@ class RadiomicsFeatureTransformer(BaseTransformer):
 
     def __init__(self, no_mask=False):
         self.no_mask = no_mask
+        self.extractor = featureextractor.RadiomicsFeatureExtractor(
+            binWidth=25,
+            normalize=True,
+            normalizeScale=1,
+            interpolator='sitkBSpline',
+            enableCExtensions=True,
+            enableParallel=False,
+            label=1,
+            additionalInfo=True
+        )
 
     @property
     def params(self):
@@ -18,21 +29,20 @@ class RadiomicsFeatureTransformer(BaseTransformer):
             d['no_mask'] = True
         return d
 
-    def transform_doc(self, doc):
-        params = {
-            'binWidth': 25,
-            'normalize': True,
-            'normalizeScale': 1,
-            # 'resampledPixelSpacing': [1, 1],
-            'interpolator': 'sitkBSpline',
-            'enableCExtensions': True,
-            'enableParallel': False,
-            # 'resegmentRange': None,
-            'label': 1,
-            'additionalInfo': True
-        }
+    def get_features(self, image: sitk.Image, mask: sitk.Image) -> tuple[dict, dict]:
+        result = self.extractor.execute(image, mask)
+        features = {}
+        diagnostics = {}
+        for k, v in result.items():
+            if k.startswith('diagnostics'):
+                diagnostics[k] = v
+            else:
+                features[k] = v
 
-        extractor = featureextractor.RadiomicsFeatureExtractor(**params)
+        return diagnostics, features
+
+    def transform_doc(self, doc):
+
         doc['features'] = {}
         doc['diagnostics'] = {}
         if self.no_mask is None:
@@ -46,15 +56,7 @@ class RadiomicsFeatureTransformer(BaseTransformer):
                 if source != 'cine':
                     img = np.sqrt(np.square(img[:, :, 0]) + np.square(img[:, :, 1]))
                 image = sitk.GetImageFromArray(img)
-                result = extractor.execute(image, mask)
-                features = {}
-                diagnostics = {}
-                for k, v in result.items():
-                    if k.startswith('diagnostics'):
-                        diagnostics[k] = v
-                    else:
-                        features[k] = v
-
+                diagnostics, features = self.get_features(image, mask)
                 doc['diagnostics'][source] = diagnostics
                 doc['features'][source] = features
             except Exception as e:
