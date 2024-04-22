@@ -30,5 +30,6 @@ class Command(BaseCommand):
                 doc['nr'] = nr
                 doc['kind'] = name
                 doc['name'] = f'{nr:04}_{name}'
+                doc['diff'] = d['cine'] - d['cine_delayed']
                 nr += 1
                 doc.save()

@@ -22,7 +22,7 @@ names = ([f'{i:04}_negative' for i in negative] +
 
 
 def make_tasks():
-    source = 'cine'
+    source = 'diff'
     radiomics_task = TransformationTask(
         cin_name='10x10',
         pipeline=[

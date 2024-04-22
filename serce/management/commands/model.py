@@ -9,6 +9,7 @@ import joblib
 import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
+import pandas
 import pandas as pd
 import pymongo
 from django.conf import settings
@@ -17,7 +18,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from pineai.db import collection_by_name, PreprocessingCollection, collection_by_meta, Document
 from skimage.morphology import skeletonize
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
-from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
 from sklearn.neighbors import KNeighborsClassifier
 
 from serce.transformers.prepare import PrepareTransformer
@@ -66,8 +67,8 @@ class Command(BaseCommand):
         action = options['action']
         if action == 'load':
             self.load()
-        elif action == 'draw_roc':
-            self.draw_roc()
+        elif action == 'calc_roc':
+            self.calc_roc()
         elif action == 'draw':
             self.draw()
         elif action == 'load_npy':
@@ -162,8 +163,8 @@ class Command(BaseCommand):
     def flatten_dist(self, img):
         return np.sqrt(np.square(img[:, :, 0]) + np.square(img[:, :, 1]))
 
-    def draw_slices(self, nr, docs):
-        pdf = PdfPages(str(settings.ANALYSIS_DIR / f'pdf/{self.source}_{self.method}_{nr}.pdf'))
+    def draw_slices(self, nr, docs, set_name):
+        pdf = PdfPages(str(settings.ANALYSIS_DIR / f'pdf/{set_name}_{self.source}_{self.method}_{nr}.pdf'))
         for doc in docs:
             fig, axs = plt.subplots(1, 6, figsize=(4000 / 100, 600 / 100), dpi=100)
 
@@ -183,8 +184,8 @@ class Command(BaseCommand):
             pdf.savefig()
         pdf.close()
 
-    def draw_patches(self, nr, docs):
-        pdf = PdfPages(str(settings.ANALYSIS_DIR / f'pdf/{self.source}_{self.method}_{nr}_patches.pdf'))
+    def draw_patches(self, nr, docs, set_name):
+        pdf = PdfPages(str(settings.ANALYSIS_DIR / f'pdf/{set_name}_{self.source}_{self.method}_{nr}_patches.pdf'))
         for doc in docs:
             for patch in doc['patches']:
                 fig, axs = plt.subplots(1, 4, figsize=(2000 / 100, 500 / 100), dpi=100)
@@ -202,63 +203,90 @@ class Command(BaseCommand):
         pdf.close()
 
     def draw(self):
-        docs_map = defaultdict(list)
-        for doc in collection_by_name('classif').find_docs({
-            'source': self.source,
-            'mask_size': self.mask_size,
-            'method': self.method,
-        }):
-            docs_map[doc['nr']].append(doc)
-        for nr, docs in docs_map.items():
-            self.draw_slices(nr, docs)
-            self.draw_patches(nr, docs)
-
-    def draw_roc(self):
-        max_means = []
-        means = []
-        labels = []
-        for lge_label in [0, 1]:
+        for set_name in ['test', 'trainval']:
             docs_map = defaultdict(list)
-            for doc in collection_by_name('classif').find_docs({
+            for doc in collection_by_name(f'classif_{set_name}').find_docs({
                 'source': self.source,
                 'mask_size': self.mask_size,
                 'method': self.method,
-                'lge_label': lge_label
             }):
                 docs_map[doc['nr']].append(doc)
             for nr, docs in docs_map.items():
-                slices_mean = np.array([np.mean(d['prob'][d['mask_sum'] > 0]) for d in docs])
-                slices_mean = slices_mean[~np.isnan(slices_mean)]
-                max_mean = np.max(slices_mean)
-                mean = np.mean(slices_mean)
+                self.draw_slices(nr, docs, set_name)
+                self.draw_patches(nr, docs, set_name)
 
-                max_means.append(max_mean)
-                means.append(mean)
-                labels.append(lge_label)
+    def calc_roc(self):
+        for set_name in ['test', 'trainval']:
+            max_means = []
+            means = []
+            labels = []
+            numbers = []
+            data = []
+            for label in [0, 1]:
+                docs_map = defaultdict(list)
+                for doc in collection_by_name(f'classif_{set_name}').find_docs({
+                    'source': self.source,
+                    'mask_size': self.mask_size,
+                    'method': self.method,
+                    'label': label
+                }):
+                    docs_map[doc['nr']].append(doc)
+                for nr, docs in docs_map.items():
+                    slices_mean = np.array([np.mean(d['prob'][d['mask_sum'] > 0]) for d in docs])
+                    slices_mean = slices_mean[~np.isnan(slices_mean)]
+                    max_mean = np.max(slices_mean)
+                    mean = np.mean(slices_mean)
 
-        print(f'Labels: {labels}')
-        print(f'Max means: {max_means}')
-        print(f'Means: {means}')
-        score = roc_auc_score(labels, max_means)
-        print(f'Max means score: {score}')
-        score = roc_auc_score(labels, means)
-        print(f'Means score: {score}')
+                    max_means.append(max_mean)
+                    means.append(mean)
+                    labels.append(label)
+                    numbers.append(nr)
+                    data.append({
+                        'nr': nr,
+                        'label': label,
+                        'slieces count': len(docs),
+                        'max_mean': max_mean,
+                        'mean': mean,
+                    })
+            df = pandas.DataFrame(data)
+            print(df)
+            df.to_csv(settings.ANALYSIS_DIR / f'auc_{set_name}_{self.source}_{self.method}.csv')
+
+            print(f'Numbers: {numbers}')
+            print(f'Labels: {labels}')
+            print(f'Max means: {max_means}')
+            print(f'Means: {means}')
+            max_means_auc = roc_auc_score(labels, max_means)
+            print(f'Max means AUC: {max_means_auc}')
+            means_auc = roc_auc_score(labels, means)
+            print(f'Means AUC: {means_auc}')
+
+            fpr, tpr, _ = roc_curve(labels, max_means)
+            plt.plot(fpr, tpr, label=f"Max means, AUC={max_means_auc:0.2f}", linestyle='dashed')
+            fpr, tpr, _ = roc_curve(labels, means)
+            plt.plot(fpr, tpr, label=f"Means, AUC={means_auc:0.2f}", linestyle='dotted')
+            plt.legend()
+            plt.savefig(str(settings.ANALYSIS_DIR / f'auc_{set_name}_{self.source}_{self.method}.png'))
+            plt.close('all')
 
     def load(self):
         half_box = self.mask_size // 2
 
         clf = pickle.loads(self.model_path.read_bytes())
         print(f'Classes: {clf.classes_}')
-        coll = collection_by_name('classif')
-        coll.clear()
 
-        for lge_dir, lge_label in [('LGE', 1), ('No_LGE', 0)]:
-            cines = self.load_nii_dir(settings.SOURCE_DATA_DIR / f'CINE_Ts/{lge_dir}/imagesTs')
-            seg_cines = self.load_nii_dir(settings.SOURCE_DATA_DIR / f'CINE_Ts/{lge_dir}/predictionsTs')
+        for set_name, source_dir, prefix in [('trainval', 'CINE_TR_19.04', 'Tr'), ('test', 'CINE_Ts/LGE', 'Ts')]:
+            coll = collection_by_name(f'classif_{set_name}')
+            coll.clear()
+            label_map = pd.read_csv(settings.SOURCE_DATA_DIR / f'{source_dir}.txt', delimiter=';',
+                                    index_col=0, names=['index', 'label'], header=None)['label']
+
+            cines = self.load_nii_dir(settings.SOURCE_DATA_DIR / source_dir / f'images{prefix}')
+            seg_cines = self.load_nii_dir(settings.SOURCE_DATA_DIR / source_dir / f'predictions{prefix}')
             reg_transforms = self.load_nii_dir(
-                settings.SOURCE_DATA_DIR / f'CINE_Ts/{lge_dir}/transformationTs_heartContracted')
+                settings.SOURCE_DATA_DIR / source_dir / f'transformation{prefix}_heartContracted')
             optical_flows = self.load_nii_dir(
-                settings.SOURCE_DATA_DIR / f'CINE_Ts/{lge_dir}/opticalFlowTs_heartContracted')
+                settings.SOURCE_DATA_DIR / source_dir / f'opticalFlow{prefix}_heartContracted')
 
             ids = set(cines) & set(seg_cines) & set(reg_transforms) & set(optical_flows)
 
@@ -296,7 +324,7 @@ class Command(BaseCommand):
                         'prob': prob,
                         'patches': np.array(patches),
                         'mask_sum': mask_sum,
-                        'lge_label': lge_label
+                        'label': label_map[nr]
                     }).save()
 
     def build(self):

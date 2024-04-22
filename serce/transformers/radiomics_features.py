@@ -1,5 +1,4 @@
 import traceback
-from collections import OrderedDict
 
 import SimpleITK as sitk
 import numpy as np
@@ -49,11 +48,10 @@ class RadiomicsFeatureTransformer(BaseTransformer):
             mask = None
         else:
             mask = sitk.GetImageFromArray(doc['mask'])
-        for source in ['cine', 'optical_flow', 'registration_transform']:
-
+        for source in ['cine', 'optical_flow', 'registration_transform', 'diff']:
             try:
                 img = doc[source]
-                if source != 'cine':
+                if source in ['optical_flow', 'registration_transform']:
                     img = np.sqrt(np.square(img[:, :, 0]) + np.square(img[:, :, 1]))
                 image = sitk.GetImageFromArray(img)
                 diagnostics, features = self.get_features(image, mask)
