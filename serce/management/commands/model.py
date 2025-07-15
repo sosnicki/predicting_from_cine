@@ -2,6 +2,7 @@ import pathlib
 import pickle
 import re
 import traceback
+import shap
 from collections import defaultdict
 
 import cv2
@@ -15,15 +16,16 @@ import pymongo
 from django.conf import settings
 from django.core.management import BaseCommand
 from matplotlib.backends.backend_pdf import PdfPages
-from pineai.db import collection_by_name, PreprocessingCollection, collection_by_meta, Document
+from pineai.db import collection_by_name, PreprocessingCollection, collection_by_meta, Document, dereference
 from skimage.morphology import skeletonize
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import Pipeline
 
 from serce.transformers.prepare import PrepareTransformer
 from serce.transformers.radiomics_features import RadiomicsFeatureTransformer
-
+from sklearn.metrics import roc_auc_score
 
 def process_img(data, model_path, source):
     try:
@@ -48,6 +50,7 @@ def process_img(data, model_path, source):
 
 class Command(BaseCommand):
     model_path: pathlib.Path
+    explainer_path: pathlib.Path
     mask_size: int
     source: str
     method: str
@@ -63,12 +66,15 @@ class Command(BaseCommand):
         self.source = options['source']
         self.method = options['method']
         self.model_path = settings.SOURCE_DATA_DIR / f'model_{self.source}_{self.method}_{self.mask_size}.pkl'
+        self.explainer_path = settings.SOURCE_DATA_DIR / f'explainer_{self.source}_{self.method}_{self.mask_size}.pkl'
 
         action = options['action']
         if action == 'load':
             self.load()
         elif action == 'calc_roc':
             self.calc_roc()
+        elif action == 'calc_roc_opt':
+            self.calc_roc_opt()
         elif action == 'draw':
             self.draw()
         elif action == 'load_npy':
@@ -234,6 +240,8 @@ class Command(BaseCommand):
                 for nr, docs in docs_map.items():
                     slices_mean = np.array([np.mean(d['prob'][d['mask_sum'] > 0]) for d in docs])
                     slices_mean = slices_mean[~np.isnan(slices_mean)]
+                    if not slices_mean.size:
+                        continue
                     max_mean = np.max(slices_mean)
                     mean = np.mean(slices_mean)
 
@@ -258,16 +266,155 @@ class Command(BaseCommand):
             print(f'Means: {means}')
             max_means_auc = roc_auc_score(labels, max_means)
             print(f'Max means AUC: {max_means_auc}')
-            means_auc = roc_auc_score(labels, means)
-            print(f'Means AUC: {means_auc}')
+            # means_auc = roc_auc_score(labels, means)
+            # print(f'Means AUC: {means_auc}')
 
-            fpr, tpr, _ = roc_curve(labels, max_means)
-            plt.plot(fpr, tpr, label=f"Max means, AUC={max_means_auc:0.2f}", linestyle='dashed')
-            fpr, tpr, _ = roc_curve(labels, means)
-            plt.plot(fpr, tpr, label=f"Means, AUC={means_auc:0.2f}", linestyle='dotted')
+            fpr, tpr, thresholds = roc_curve(labels, max_means)
+
+            # Compute Youden's index for each threshold
+            youden_index = tpr - fpr
+            optimal_threshold_index = np.argmax(youden_index)
+            optimal_threshold = thresholds[optimal_threshold_index]
+
+            # Compute Sensitivity (Recall) and Specificity at optimal threshold
+            sensitivity = tpr[optimal_threshold_index]
+            specificity = 1 - fpr[optimal_threshold_index]
+
+            print(f"Optimal Threshold: {optimal_threshold}")
+            print(f"Youden's Index: {youden_index[optimal_threshold_index]}")
+            print(f"Sensitivity (Recall) at Optimal Threshold: {sensitivity}")
+            print(f"Specificity at Optimal Threshold: {specificity}")
+
+
+            plt.plot(fpr, tpr, label=f"Test set of Cine images, AUC={max_means_auc:0.2f}", linestyle='dashed')
+            # fpr, tpr, _ = roc_curve(labels, means)
+            # plt.plot(fpr, tpr, label=f"Means, AUC={means_auc:0.2f}", linestyle='dotted')
+            plt.xlabel('False positive rate')
+            plt.ylabel('True positive rate')
             plt.legend()
             plt.savefig(str(settings.ANALYSIS_DIR / f'auc_{set_name}_{self.source}_{self.method}.png'))
             plt.close('all')
+
+    def confidence(self, title, y_true, y_scores):
+        y_true = np.array(y_true)
+        y_scores = np.array(y_scores)
+        # Number of bootstrap samples
+        n_bootstraps = 2000
+        rng = np.random.RandomState(seed=42)  # For reproducibility
+
+        bootstrapped_scores = []
+
+        for i in range(n_bootstraps):
+            # Bootstrap by sampling with replacement
+            indices = rng.randint(0, len(y_true), len(y_true))
+            if len(np.unique(y_true[indices])) < 2:
+                # We need at least one positive and one negative sample for a valid ROC AUC
+                continue
+
+            score = roc_auc_score(y_true[indices], y_scores[indices])
+            bootstrapped_scores.append(score)
+
+        # Calculate 95% confidence interval
+        sorted_scores = np.sort(bootstrapped_scores)
+        confidence_lower = sorted_scores[int(0.025 * len(sorted_scores))]
+        confidence_upper = sorted_scores[int(0.975 * len(sorted_scores))]
+
+        print(f"95% Confidence interval for the {title} ROC AUC: [{confidence_lower:.3f} - {confidence_upper:.3f}]")
+
+    def calc_roc_opt(self):
+        max_means = []
+        means = []
+        labels = []
+        numbers = []
+        data = []
+        for label in [0, 1]:
+            docs_map = defaultdict(list)
+            for doc in collection_by_name(f'classif_test').find_docs({
+                'source': self.source,
+                'mask_size': self.mask_size,
+                'method': self.method,
+                'label': label
+            }):
+                docs_map[doc['nr']].append(doc)
+            for nr, docs in docs_map.items():
+                slices_mean = np.array([np.mean(d['prob'][d['mask_sum'] > 0]) for d in docs])
+                slices_mean = slices_mean[~np.isnan(slices_mean)]
+                if not slices_mean.size:
+                    continue
+                max_mean = np.max(slices_mean)
+                mean = np.mean(slices_mean)
+
+                max_means.append(max_mean)
+                means.append(mean)
+                labels.append(label)
+                numbers.append(nr)
+                data.append({
+                    'nr': nr,
+                    'label': label,
+                    'slieces count': len(docs),
+                    'max_mean': max_mean,
+                    'mean': mean,
+                })
+        print(f'Numbers: {numbers}')
+        print(f'Labels: {labels}')
+        print(f'Max means: {max_means}')
+        print(f'Means: {means}')
+        max_means_auc = roc_auc_score(labels, max_means)
+        print(f'Max means AUC: {max_means_auc}')
+
+        fpr, tpr, _ = roc_curve(labels, max_means)
+        self.confidence('test', labels, max_means)
+
+        plt.plot(fpr, tpr, label=f"Test set of Cine images, AUC={max_means_auc:0.2f}")
+
+        opt = collection_by_name('opt').find_doc({'roc_auc': {'$gt': 0.9036, '$lte': 0.9037}})
+        print(opt)
+        # y_pred = opt['y_pred']
+
+        # Train a model with the best parameters
+        classifier_cls = Pipeline([('RFB', RandomForestClassifier(class_weight='balanced', random_state=36))])
+        best_model = classifier_cls.set_params(**opt['best_params'])
+        best_model.fit(opt['din']['X_trainval'], opt['din']['y_trainval'])
+
+        plt.close('all')
+        doc = dereference(opt['din']['split']['test_docs'][0])
+        feature_names = sorted(doc['features'][self.source])
+        feature_names = [f'Cine - {i}' for i in feature_names] + [f'Registration Transform - {i}' for i in feature_names]
+        explainer = shap.Explainer(best_model.predict, opt['din']['X_trainval'])
+        shap_values = explainer.shap_values(opt['din']['X_test'])
+        shap.summary_plot(shap_values, opt['din']['X_test'], feature_names=feature_names, plot_size=(12, 6))
+        shap.summary_plot(shap_values, opt['din']['X_test'], feature_names=feature_names, plot_size=(12, 6), max_display=10)
+
+        plt.savefig(str(settings.ANALYSIS_DIR / f'shap_{self.source}.png'))
+        plt.close('all')
+        return
+
+        for ds in ['X_test', 'X_trainval']:
+            y_pred_proba = best_model.predict_proba(opt['din'][ds])[:, 1]
+            if ds == 'X_test':
+                y_true = opt['y_true']
+                title = 'Test set of patches, AUC'
+                linestyle = 'dashed'
+            else:
+                y_true = opt['din']['y_trainval']
+                title = 'Training set of patches, AUC'
+                linestyle = 'dotted'
+            auc = roc_auc_score(y_true, y_pred_proba)
+            if ds == 'X_test':
+                auc = opt['roc_auc']
+
+            # accuracy = accuracy_score(y_true, y_pred)
+
+            fpr, tpr, _ = roc_curve(y_true, y_pred_proba)
+            self.confidence(ds, y_true, y_pred_proba)
+            plt.plot(fpr, tpr, label=f"{title}={auc:0.2f}", linestyle=linestyle)
+            # fpr, tpr, _ = roc_curve(labels, means)
+            # plt.plot(fpr, tpr, label=f"Means, AUC={means_auc:0.2f}", linestyle='dotted')
+        plt.xlabel('False positive rate')
+        plt.ylabel('True positive rate')
+        plt.legend()
+        plt.savefig(str(settings.ANALYSIS_DIR / f'auc_{self.source}_{self.method}.png'))
+        plt.close('all')
 
     def load(self):
         half_box = self.mask_size // 2
@@ -277,7 +424,7 @@ class Command(BaseCommand):
 
         for set_name, source_dir, prefix in [('trainval', 'CINE_TR_19.04', 'Tr'), ('test', 'CINE_Ts/LGE', 'Ts')]:
             coll = collection_by_name(f'classif_{set_name}')
-            coll.clear()
+            # coll.clear()
             label_map = pd.read_csv(settings.SOURCE_DATA_DIR / f'{source_dir}.txt', delimiter=';',
                                     index_col=0, names=['index', 'label'], header=None)['label']
 
@@ -374,8 +521,10 @@ class Command(BaseCommand):
             raise Exception('Invalid method')
         X = np.array(X)
         y = np.array(y)
-        clf.fit(X, y)
         print(f'Fitting model with X {X.shape} and y {y.shape}')
+        clf.fit(X, y)
+        explainer = shap.Explainer(clf, X)
+        self.explainer_path.write_bytes(pickle.dumps(explainer))
         self.model_path.write_bytes(pickle.dumps(clf))
         print(f'Model saved to path {self.model_path}')
 
@@ -383,3 +532,4 @@ class Command(BaseCommand):
         y_pred = clf2.predict(X)
         print(f'Accuracy: {accuracy_score(y, y_pred) * 100:0.2f}')
         print(f'ROC AUC: {roc_auc_score(y, y_pred) * 100:0.2f}')
+
